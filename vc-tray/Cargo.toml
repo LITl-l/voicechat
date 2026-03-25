@@ -1,0 +1,10 @@
+[package]
+name = "vc-tray"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vc-core = { path = "../vc-core" }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
