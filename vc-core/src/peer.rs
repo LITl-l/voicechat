@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::codec;
-use crate::crypto::ReplayFilter;
+use crate::crypto::{CryptoContext, ReplayFilter};
 use crate::jitter::JitterBuffer;
+use crate::latency::LatencyTracker;
 use crate::net::*;
 
 pub const MAX_PEERS: usize = 5;
@@ -36,6 +37,14 @@ pub struct RemotePeer {
     pub send_seq: u16,
     /// Sample timestamp counter.
     pub send_timestamp: u32,
+    /// Latency measurement tracker.
+    pub latency_tracker: LatencyTracker,
+    /// Per-peer crypto context derived from X25519 key exchange.
+    pub peer_crypto: Option<CryptoContext>,
+    /// Whether we have sent our KEY_EXCHANGE to this peer.
+    pub kx_sent: bool,
+    /// Whether we have received this peer's KEY_EXCHANGE (and derived key).
+    pub kx_received: bool,
 }
 
 impl RemotePeer {
@@ -50,6 +59,10 @@ impl RemotePeer {
             last_seen: Instant::now(),
             send_seq: 0,
             send_timestamp: 0,
+            latency_tracker: LatencyTracker::new(),
+            peer_crypto: None,
+            kx_sent: false,
+            kx_received: false,
         })
     }
 

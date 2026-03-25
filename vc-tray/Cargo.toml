@@ -8,3 +8,5 @@ vc-core = { path = "../vc-core" }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+eframe = { workspace = true }
+ctrlc = { workspace = true }

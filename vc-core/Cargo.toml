@@ -14,3 +14,7 @@ argon2 = { workspace = true }
 rand = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
+nnnoiseless = { workspace = true }
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
