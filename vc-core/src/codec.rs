@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use audiopus::{
     coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
-    Application, Bitrate, Channels, MutSignals, SampleRate,
     packet::Packet as OpusPacket,
+    Application, Bitrate, Channels, MutSignals, SampleRate,
 };
 use std::convert::TryFrom;
 
@@ -23,12 +23,9 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new() -> Result<Self> {
-        let mut encoder = OpusEncoder::new(
-            SampleRate::Hz48000,
-            Channels::Mono,
-            Application::LowDelay,
-        )
-        .map_err(|e| anyhow!("opus encoder init: {e}"))?;
+        let mut encoder =
+            OpusEncoder::new(SampleRate::Hz48000, Channels::Mono, Application::LowDelay)
+                .map_err(|e| anyhow!("opus encoder init: {e}"))?;
 
         encoder
             .set_bitrate(Bitrate::BitsPerSecond(64000))
@@ -59,7 +56,7 @@ impl Encoder {
             .inner
             .encode(pcm, &mut output)
             .map_err(|e| anyhow!("opus encode: {e}"))?;
-        output.truncate(len.into());
+        output.truncate(len);
         Ok(output)
     }
 }
@@ -78,10 +75,10 @@ impl Decoder {
     /// Decode an Opus packet into `FRAME_SAMPLES` i16 samples.
     pub fn decode(&mut self, opus_data: &[u8]) -> Result<Vec<i16>> {
         let mut output = vec![0i16; FRAME_SAMPLES];
-        let packet = OpusPacket::try_from(opus_data)
-            .map_err(|e| anyhow!("invalid opus packet: {e}"))?;
-        let mut_signals = MutSignals::try_from(&mut output)
-            .map_err(|e| anyhow!("mut signals: {e}"))?;
+        let packet =
+            OpusPacket::try_from(opus_data).map_err(|e| anyhow!("invalid opus packet: {e}"))?;
+        let mut_signals =
+            MutSignals::try_from(&mut output).map_err(|e| anyhow!("mut signals: {e}"))?;
         let decoded = self
             .inner
             .decode(Some(packet), mut_signals, false)
@@ -93,8 +90,8 @@ impl Decoder {
     /// Packet loss concealment: generate comfort audio when a packet is missing.
     pub fn decode_plc(&mut self) -> Result<Vec<i16>> {
         let mut output = vec![0i16; FRAME_SAMPLES];
-        let mut_signals = MutSignals::try_from(&mut output)
-            .map_err(|e| anyhow!("mut signals: {e}"))?;
+        let mut_signals =
+            MutSignals::try_from(&mut output).map_err(|e| anyhow!("mut signals: {e}"))?;
         let decoded = self
             .inner
             .decode(None, mut_signals, false)

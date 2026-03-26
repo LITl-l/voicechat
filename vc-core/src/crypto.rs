@@ -122,8 +122,7 @@ impl CryptoContext {
         counter: u32,
     ) -> Result<Vec<u8>> {
         // Reconstruct the sender's nonce: same peer_id + Direction::Send
-        let nonce_bytes =
-            build_nonce(&self.session_id, peer_id, Direction::Send, seq_num, counter);
+        let nonce_bytes = build_nonce(&self.session_id, peer_id, Direction::Send, seq_num, counter);
         let nonce = XNonce::from_slice(&nonce_bytes);
 
         self.cipher
@@ -145,6 +144,12 @@ pub struct ReplayFilter {
     /// Bitmap for the window [highest - SLIDING_WINDOW_SIZE + 1 .. highest].
     /// Bit i represents counter value (highest - i).
     bitmap: u64,
+}
+
+impl Default for ReplayFilter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReplayFilter {
@@ -200,7 +205,9 @@ mod tests {
         let payload = b"hello opus data";
 
         let (ciphertext, counter) = sender.encrypt(&header, payload, 0, 1).unwrap();
-        let decrypted = receiver.decrypt(&header, &ciphertext, 0, 1, counter).unwrap();
+        let decrypted = receiver
+            .decrypt(&header, &ciphertext, 0, 1, counter)
+            .unwrap();
 
         assert_eq!(decrypted, payload);
     }

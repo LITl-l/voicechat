@@ -148,9 +148,9 @@ impl PeerManager {
         if self.peers.len() >= MAX_PEERS - 1 {
             return Err(anyhow!("max peers reached"));
         }
-        if !self.peers.contains_key(&id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.peers.entry(id) {
             log::info!("Adding peer {id} at {addr}");
-            self.peers.insert(id, RemotePeer::new(id, addr)?);
+            e.insert(RemotePeer::new(id, addr)?);
             self.addr_to_id.insert(addr, id);
         } else {
             // Update address if changed
@@ -242,13 +242,9 @@ mod tests {
         let id1 = pm.allocate_peer_id().unwrap();
         assert_eq!(id1, 1);
 
-        pm.add_peer(id1, "127.0.0.1:5001".parse().unwrap())
-            .unwrap();
+        pm.add_peer(id1, "127.0.0.1:5001".parse().unwrap()).unwrap();
         assert_eq!(pm.peers.len(), 1);
-        assert_eq!(
-            pm.peer_by_addr(&"127.0.0.1:5001".parse().unwrap()),
-            Some(1)
-        );
+        assert_eq!(pm.peer_by_addr(&"127.0.0.1:5001".parse().unwrap()), Some(1));
     }
 
     #[test]
