@@ -8,6 +8,9 @@ pub const PKT_HELLO: u8 = 0x03;
 pub const PKT_PEER_LIST: u8 = 0x04;
 pub const PKT_KEEPALIVE: u8 = 0x05;
 pub const PKT_HELLO_ACK: u8 = 0x06;
+pub const PKT_PING: u8 = 0x07;
+pub const PKT_PONG: u8 = 0x08;
+pub const PKT_KEY_EXCHANGE: u8 = 0x09;
 
 pub const HEADER_LEN: usize = 8;
 pub const MAX_PACKET_LEN: usize = 1200; // well under MTU

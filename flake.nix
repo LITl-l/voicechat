@@ -23,6 +23,15 @@
             alsa-lib
             libopus
             openssl
+            # eframe/egui dependencies (Phase 4: system tray UI)
+            libxkbcommon
+            wayland
+            libx11
+            libxcursor
+            libxrandr
+            libxi
+            libGL
+            vulkan-loader
           ];
 
           shellHook = ''
@@ -30,6 +39,14 @@
               pkgs.alsa-lib
               pkgs.libopus
               pkgs.openssl
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxrandr
+              pkgs.libxi
+              pkgs.libGL
+              pkgs.vulkan-loader
             ]}:$LD_LIBRARY_PATH"
             # Ensure rustup has a default toolchain
             if ! rustup show active-toolchain &>/dev/null 2>&1; then
