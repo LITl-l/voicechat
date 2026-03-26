@@ -198,8 +198,7 @@ impl Session {
 
         while self.running.load(Ordering::Relaxed) {
             // Sync controls from shared state
-            noise_suppressor
-                .set_enabled(self.shared.noise_suppression.load(Ordering::Relaxed));
+            noise_suppressor.set_enabled(self.shared.noise_suppression.load(Ordering::Relaxed));
             ptt_flag.store(
                 self.shared.ptt_active.load(Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -284,10 +283,12 @@ impl Session {
                                             && peer.peer_crypto.is_some();
 
                                         let encrypt_result = if use_peer_key {
-                                            peer.peer_crypto
-                                                .as_mut()
-                                                .unwrap()
-                                                .encrypt(&header_bytes, &opus_data, local_id, seq)
+                                            peer.peer_crypto.as_mut().unwrap().encrypt(
+                                                &header_bytes,
+                                                &opus_data,
+                                                local_id,
+                                                seq,
+                                            )
                                         } else {
                                             crypto_ctx.encrypt(
                                                 &header_bytes,
@@ -301,9 +302,7 @@ impl Session {
                                             Ok((encrypted, _counter)) => {
                                                 let wire =
                                                     build_wire_packet(&header_bytes, &encrypted);
-                                                if let Err(e) =
-                                                    socket.send_to(&wire, *peer_addr)
-                                                {
+                                                if let Err(e) = socket.send_to(&wire, *peer_addr) {
                                                     log::warn!("send to {peer_addr}: {e}");
                                                 }
                                             }
@@ -335,12 +334,10 @@ impl Session {
                     Some(pcm_i16) => {
                         peer_bufs.push(codec::i16_to_f32(&pcm_i16));
                     }
-                    None => {
-                        match peer.decoder.decode_plc() {
-                            Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
-                            Err(e) => log::debug!("PLC error for peer {}: {e}", peer.id),
-                        }
-                    }
+                    None => match peer.decoder.decode_plc() {
+                        Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
+                        Err(e) => log::debug!("PLC error for peer {}: {e}", peer.id),
+                    },
                 }
             }
 
@@ -554,8 +551,7 @@ impl Session {
 
             PKT_PEER_LIST => {
                 let psk_ctx = CryptoContext::new(key, [0; 8]);
-                let plaintext =
-                    psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
                 let pl = PeerListPayload::from_bytes(&plaintext)?;
 
                 let my_id = pl
@@ -681,8 +677,7 @@ impl Session {
 
             PKT_KEY_EXCHANGE => {
                 let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
-                let plaintext =
-                    psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
                 let kx = KeyExchangePayload::from_bytes(&plaintext)?;
 
                 let peer_id = header.peer_id;
@@ -714,8 +709,7 @@ impl Session {
                     let hdr = PacketHeader::new(PKT_KEY_EXCHANGE, local_id, 0, 0);
                     let hdr_bytes = hdr.to_bytes();
                     let mut psk_ctx = CryptoContext::new(key, session_id);
-                    if let Ok((encrypted, _)) =
-                        psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0)
+                    if let Ok((encrypted, _)) = psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0)
                     {
                         let wire = build_wire_packet(&hdr_bytes, &encrypted);
                         let _ = socket.send_to(&wire, src_addr);

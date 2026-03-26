@@ -68,7 +68,7 @@ pub fn start_capture(
         Some(name) => host
             .input_devices()
             .map_err(|e| anyhow!("input devices: {e}"))?
-            .find(|d| d.name().map_or(false, |n| n == name))
+            .find(|d| d.name().is_ok_and(|n| n == name))
             .ok_or_else(|| anyhow!("input device '{name}' not found"))?,
         None => host
             .default_input_device()
@@ -119,7 +119,7 @@ pub fn start_playout(
         Some(name) => host
             .output_devices()
             .map_err(|e| anyhow!("output devices: {e}"))?
-            .find(|d| d.name().map_or(false, |n| n == name))
+            .find(|d| d.name().is_ok_and(|n| n == name))
             .ok_or_else(|| anyhow!("output device '{name}' not found"))?,
         None => host
             .default_output_device()

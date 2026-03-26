@@ -16,6 +16,12 @@ pub struct KeyExchange {
     public: PublicKey,
 }
 
+impl Default for KeyExchange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyExchange {
     pub fn new() -> Self {
         let secret = StaticSecret::random_from_rng(rand::thread_rng());

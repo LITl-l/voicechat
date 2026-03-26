@@ -161,11 +161,7 @@ impl VoiceChatApp {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.lobby.input_mode_idx, 0, "Always On");
                         ui.selectable_value(&mut self.lobby.input_mode_idx, 1, "Push-to-Talk");
-                        ui.selectable_value(
-                            &mut self.lobby.input_mode_idx,
-                            2,
-                            "Voice Activation",
-                        );
+                        ui.selectable_value(&mut self.lobby.input_mode_idx, 2, "Voice Activation");
                     });
                 ui.end_row();
             });

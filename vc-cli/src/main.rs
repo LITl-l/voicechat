@@ -248,7 +248,13 @@ fn spawn_stats_printer(shared: Arc<vc_core::SessionShared>, running: Arc<AtomicB
                             pfs,
                         );
                     } else {
-                        log::info!("Peer {} ({}): {} | no latency data | {}", p.id, p.addr, state, pfs);
+                        log::info!(
+                            "Peer {} ({}): {} | no latency data | {}",
+                            p.id,
+                            p.addr,
+                            state,
+                            pfs
+                        );
                     }
                 }
             }

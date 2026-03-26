@@ -31,6 +31,12 @@ pub struct JitterBuffer {
     time_since_decrease: f64,
 }
 
+impl Default for JitterBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JitterBuffer {
     pub fn new() -> Self {
         Self {

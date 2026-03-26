@@ -44,8 +44,7 @@ impl VoiceActivityDetector {
         let energy_db = compute_energy_db(pcm);
 
         let voice_detected = if let Some(vad_prob) = rnnoise_vad {
-            energy_db > self.config.energy_threshold_db
-                && vad_prob > self.config.rnnoise_threshold
+            energy_db > self.config.energy_threshold_db && vad_prob > self.config.rnnoise_threshold
         } else {
             energy_db > self.config.energy_threshold_db
         };

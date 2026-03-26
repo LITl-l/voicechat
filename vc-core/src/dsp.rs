@@ -20,6 +20,12 @@ pub struct NoiseSuppressor {
     enabled: bool,
 }
 
+impl Default for NoiseSuppressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NoiseSuppressor {
     pub fn new() -> Self {
         Self {
