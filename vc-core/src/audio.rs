@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::codec::SAMPLE_RATE;
 
 /// Desired buffer size in samples for minimum latency (~2ms at 48kHz = 96 samples).
+/// Used as a hint — falls back to device default if unsupported.
 const DESIRED_BUFFER_SAMPLES: u32 = 96;
 
 /// Ring buffer capacity in f32 samples (enough for ~50ms of audio).
@@ -48,18 +49,18 @@ pub fn list_output_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
-fn build_stream_config() -> StreamConfig {
+fn build_stream_config(buffer_size: BufferSize) -> StreamConfig {
     StreamConfig {
         channels: 1,
         sample_rate: SampleRate(SAMPLE_RATE),
-        buffer_size: BufferSize::Fixed(DESIRED_BUFFER_SAMPLES),
+        buffer_size,
     }
 }
 
 /// Start capturing audio from the default input device.
 /// Samples are pushed into the ring buffer producer.
 pub fn start_capture(
-    mut producer: CaptureProducer,
+    producer: CaptureProducer,
     running: Arc<AtomicBool>,
     device_name: Option<&str>,
 ) -> Result<cpal::Stream> {
@@ -75,33 +76,60 @@ pub fn start_capture(
             .ok_or_else(|| anyhow!("no default input device"))?,
     };
 
-    let config = build_stream_config();
-    log::info!(
-        "Capture device: {}, config: {:?}",
-        device.name().unwrap_or_default(),
-        config
-    );
+    let dev_name = device.name().unwrap_or_default();
 
-    let running_clone = running.clone();
-    let stream = device.build_input_stream(
-        &config,
-        move |data: &[f32], _info: &cpal::InputCallbackInfo| {
-            if !running_clone.load(Ordering::Relaxed) {
+    // Wrap producer in Arc<Mutex> so we can retry with a different config if needed.
+    let producer = Arc::new(std::sync::Mutex::new(producer));
+
+    let make_data_cb = |prod: Arc<std::sync::Mutex<CaptureProducer>>,
+                        run: Arc<AtomicBool>|
+     -> Box<dyn FnMut(&[f32], &cpal::InputCallbackInfo) + Send> {
+        Box::new(move |data, _info| {
+            if !run.load(Ordering::Relaxed) {
                 return;
             }
-            let written = producer.push_slice(data);
+            let mut p = prod.lock().unwrap();
+            let written = p.push_slice(data);
             if written < data.len() {
                 log::warn!(
                     "capture ring buffer overflow: dropped {} samples",
                     data.len() - written
                 );
             }
-        },
-        move |err| {
-            log::error!("capture stream error: {err}");
-        },
+        })
+    };
+
+    let make_err_cb = || -> Box<dyn FnMut(cpal::StreamError) + Send> {
+        Box::new(|err| log::error!("capture stream error: {err}"))
+    };
+
+    // Try low-latency fixed buffer first
+    let config = build_stream_config(BufferSize::Fixed(DESIRED_BUFFER_SAMPLES));
+    log::info!("Capture device: {dev_name}, trying config: {config:?}");
+
+    let stream = match device.build_input_stream(
+        &config,
+        make_data_cb(producer.clone(), running.clone()),
+        make_err_cb(),
         None,
-    )?;
+    ) {
+        Ok(s) => {
+            log::info!("Capture using fixed buffer size: {DESIRED_BUFFER_SAMPLES}");
+            s
+        }
+        Err(first_err) => {
+            let fallback = build_stream_config(BufferSize::Default);
+            log::warn!(
+                "Fixed buffer size rejected ({first_err}), falling back to: {fallback:?}"
+            );
+            device.build_input_stream(
+                &fallback,
+                make_data_cb(producer, running),
+                make_err_cb(),
+                None,
+            )?
+        }
+    };
 
     stream.play()?;
     Ok(stream)
@@ -110,7 +138,7 @@ pub fn start_capture(
 /// Start playout to the default output device.
 /// Samples are pulled from the ring buffer consumer.
 pub fn start_playout(
-    mut consumer: PlayoutConsumer,
+    consumer: PlayoutConsumer,
     running: Arc<AtomicBool>,
     device_name: Option<&str>,
 ) -> Result<cpal::Stream> {
@@ -126,32 +154,55 @@ pub fn start_playout(
             .ok_or_else(|| anyhow!("no default output device"))?,
     };
 
-    let config = build_stream_config();
-    log::info!(
-        "Playout device: {}, config: {:?}",
-        device.name().unwrap_or_default(),
-        config
-    );
+    let dev_name = device.name().unwrap_or_default();
+    let consumer = Arc::new(std::sync::Mutex::new(consumer));
 
-    let running_clone = running.clone();
-    let stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-            if !running_clone.load(Ordering::Relaxed) {
+    let make_data_cb = |cons: Arc<std::sync::Mutex<PlayoutConsumer>>,
+                        run: Arc<AtomicBool>|
+     -> Box<dyn FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send> {
+        Box::new(move |data, _info| {
+            if !run.load(Ordering::Relaxed) {
                 data.fill(0.0);
                 return;
             }
-            let read = consumer.pop_slice(data);
-            // Fill remaining with silence if ring buffer underflows
+            let mut c = cons.lock().unwrap();
+            let read = c.pop_slice(data);
             if read < data.len() {
                 data[read..].fill(0.0);
             }
-        },
-        move |err| {
-            log::error!("playout stream error: {err}");
-        },
+        })
+    };
+
+    let make_err_cb = || -> Box<dyn FnMut(cpal::StreamError) + Send> {
+        Box::new(|err| log::error!("playout stream error: {err}"))
+    };
+
+    let config = build_stream_config(BufferSize::Fixed(DESIRED_BUFFER_SAMPLES));
+    log::info!("Playout device: {dev_name}, trying config: {config:?}");
+
+    let stream = match device.build_output_stream(
+        &config,
+        make_data_cb(consumer.clone(), running.clone()),
+        make_err_cb(),
         None,
-    )?;
+    ) {
+        Ok(s) => {
+            log::info!("Playout using fixed buffer size: {DESIRED_BUFFER_SAMPLES}");
+            s
+        }
+        Err(first_err) => {
+            let fallback = build_stream_config(BufferSize::Default);
+            log::warn!(
+                "Fixed buffer size rejected ({first_err}), falling back to: {fallback:?}"
+            );
+            device.build_output_stream(
+                &fallback,
+                make_data_cb(consumer, running),
+                make_err_cb(),
+                None,
+            )?
+        }
+    };
 
     stream.play()?;
     Ok(stream)
