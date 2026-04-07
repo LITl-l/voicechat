@@ -49,12 +49,34 @@ pub fn list_output_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
-fn build_stream_config(buffer_size: BufferSize) -> StreamConfig {
+fn build_stream_config(channels: u16, buffer_size: BufferSize) -> StreamConfig {
     StreamConfig {
-        channels: 1,
+        channels,
         sample_rate: SampleRate(SAMPLE_RATE),
         buffer_size,
     }
+}
+
+/// Build a list of configs to try, from most preferred to least.
+/// Returns (config, is_device_default) pairs.
+fn candidate_configs(device_default: Option<&StreamConfig>) -> Vec<StreamConfig> {
+    let mut configs = vec![
+        // 1. Mono, fixed low-latency buffer
+        build_stream_config(1, BufferSize::Fixed(DESIRED_BUFFER_SAMPLES)),
+        // 2. Mono, default buffer
+        build_stream_config(1, BufferSize::Default),
+    ];
+    // 3. Device's native config (may be stereo) with default buffer
+    if let Some(dev) = device_default {
+        if dev.channels > 1 {
+            configs.push(build_stream_config(
+                dev.channels,
+                BufferSize::Fixed(DESIRED_BUFFER_SAMPLES),
+            ));
+            configs.push(build_stream_config(dev.channels, BufferSize::Default));
+        }
+    }
+    configs
 }
 
 /// Start capturing audio from the default input device.
@@ -78,61 +100,81 @@ pub fn start_capture(
 
     let dev_name = device.name().unwrap_or_default();
 
-    // Wrap producer in Arc<Mutex> so we can retry with a different config if needed.
-    let producer = Arc::new(std::sync::Mutex::new(producer));
+    let device_default_config = device.default_input_config().ok().map(StreamConfig::from);
 
-    let make_data_cb = |prod: Arc<std::sync::Mutex<CaptureProducer>>,
-                        run: Arc<AtomicBool>|
-     -> Box<dyn FnMut(&[f32], &cpal::InputCallbackInfo) + Send> {
-        Box::new(move |data, _info| {
-            if !run.load(Ordering::Relaxed) {
-                return;
-            }
-            let mut p = prod.lock().unwrap();
-            let written = p.push_slice(data);
-            if written < data.len() {
-                log::warn!(
-                    "capture ring buffer overflow: dropped {} samples",
-                    data.len() - written
-                );
-            }
-        })
-    };
+    let configs = candidate_configs(device_default_config.as_ref());
+
+    let producer = Arc::new(std::sync::Mutex::new(producer));
 
     let make_err_cb = || -> Box<dyn FnMut(cpal::StreamError) + Send> {
         Box::new(|err| log::error!("capture stream error: {err}"))
     };
 
-    // Try low-latency fixed buffer first
-    let config = build_stream_config(BufferSize::Fixed(DESIRED_BUFFER_SAMPLES));
-    log::info!("Capture device: {dev_name}, trying config: {config:?}");
+    type InputCb = Box<dyn FnMut(&[f32], &cpal::InputCallbackInfo) + Send>;
+    let mut last_err = None;
+    for config in &configs {
+        log::info!("Capture device: {dev_name}, trying config: {config:?}");
 
-    let stream = match device.build_input_stream(
-        &config,
-        make_data_cb(producer.clone(), running.clone()),
-        make_err_cb(),
-        None,
-    ) {
-        Ok(s) => {
-            log::info!("Capture using fixed buffer size: {DESIRED_BUFFER_SAMPLES}");
-            s
-        }
-        Err(first_err) => {
-            let fallback = build_stream_config(BufferSize::Default);
-            log::warn!(
-                "Fixed buffer size rejected ({first_err}), falling back to: {fallback:?}"
-            );
-            device.build_input_stream(
-                &fallback,
-                make_data_cb(producer, running),
-                make_err_cb(),
-                None,
-            )?
-        }
-    };
+        let channels = config.channels as usize;
+        let prod = producer.clone();
+        let run = running.clone();
 
-    stream.play()?;
-    Ok(stream)
+        let data_cb: InputCb = if channels == 1 {
+            Box::new(move |data, _info| {
+                if !run.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut p = prod.lock().unwrap();
+                let written = p.push_slice(data);
+                if written < data.len() {
+                    log::warn!(
+                        "capture ring buffer overflow: dropped {} samples",
+                        data.len() - written
+                    );
+                }
+            })
+        } else {
+            // Downmix multi-channel to mono by averaging
+            Box::new(move |data, _info| {
+                if !run.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mono: Vec<f32> = data
+                    .chunks_exact(channels)
+                    .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                    .collect();
+                let mut p = prod.lock().unwrap();
+                let written = p.push_slice(&mono);
+                if written < mono.len() {
+                    log::warn!(
+                        "capture ring buffer overflow: dropped {} samples",
+                        mono.len() - written
+                    );
+                }
+            })
+        };
+
+        match device.build_input_stream(config, data_cb, make_err_cb(), None) {
+            Ok(stream) => {
+                if channels > 1 {
+                    log::info!("Capture using {channels}-channel config, downmixing to mono");
+                } else {
+                    log::info!("Capture using mono config");
+                }
+                stream.play()?;
+                return Ok(stream);
+            }
+            Err(e) => {
+                log::warn!("Config rejected ({e}), trying next...");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "no supported capture config for device '{dev_name}': {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 /// Start playout to the default output device.
@@ -155,55 +197,78 @@ pub fn start_playout(
     };
 
     let dev_name = device.name().unwrap_or_default();
-    let consumer = Arc::new(std::sync::Mutex::new(consumer));
 
-    let make_data_cb = |cons: Arc<std::sync::Mutex<PlayoutConsumer>>,
-                        run: Arc<AtomicBool>|
-     -> Box<dyn FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send> {
-        Box::new(move |data, _info| {
-            if !run.load(Ordering::Relaxed) {
-                data.fill(0.0);
-                return;
-            }
-            let mut c = cons.lock().unwrap();
-            let read = c.pop_slice(data);
-            if read < data.len() {
-                data[read..].fill(0.0);
-            }
-        })
-    };
+    let device_default_config = device.default_output_config().ok().map(StreamConfig::from);
+
+    let configs = candidate_configs(device_default_config.as_ref());
+
+    let consumer = Arc::new(std::sync::Mutex::new(consumer));
 
     let make_err_cb = || -> Box<dyn FnMut(cpal::StreamError) + Send> {
         Box::new(|err| log::error!("playout stream error: {err}"))
     };
 
-    let config = build_stream_config(BufferSize::Fixed(DESIRED_BUFFER_SAMPLES));
-    log::info!("Playout device: {dev_name}, trying config: {config:?}");
+    type OutputCb = Box<dyn FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send>;
+    let mut last_err = None;
+    for config in &configs {
+        log::info!("Playout device: {dev_name}, trying config: {config:?}");
 
-    let stream = match device.build_output_stream(
-        &config,
-        make_data_cb(consumer.clone(), running.clone()),
-        make_err_cb(),
-        None,
-    ) {
-        Ok(s) => {
-            log::info!("Playout using fixed buffer size: {DESIRED_BUFFER_SAMPLES}");
-            s
-        }
-        Err(first_err) => {
-            let fallback = build_stream_config(BufferSize::Default);
-            log::warn!(
-                "Fixed buffer size rejected ({first_err}), falling back to: {fallback:?}"
-            );
-            device.build_output_stream(
-                &fallback,
-                make_data_cb(consumer, running),
-                make_err_cb(),
-                None,
-            )?
-        }
-    };
+        let channels = config.channels as usize;
+        let cons = consumer.clone();
+        let run = running.clone();
 
-    stream.play()?;
-    Ok(stream)
+        let data_cb: OutputCb = if channels == 1 {
+            Box::new(move |data, _info| {
+                if !run.load(Ordering::Relaxed) {
+                    data.fill(0.0);
+                    return;
+                }
+                let mut c = cons.lock().unwrap();
+                let read = c.pop_slice(data);
+                if read < data.len() {
+                    data[read..].fill(0.0);
+                }
+            })
+        } else {
+            // Upmix mono to multi-channel by duplicating
+            Box::new(move |data, _info| {
+                if !run.load(Ordering::Relaxed) {
+                    data.fill(0.0);
+                    return;
+                }
+                let mono_frames = data.len() / channels;
+                let mut mono_buf = vec![0.0f32; mono_frames];
+                let mut c = cons.lock().unwrap();
+                let read = c.pop_slice(&mut mono_buf);
+                drop(c);
+                for i in 0..mono_frames {
+                    let sample = if i < read { mono_buf[i] } else { 0.0 };
+                    for ch in 0..channels {
+                        data[i * channels + ch] = sample;
+                    }
+                }
+            })
+        };
+
+        match device.build_output_stream(config, data_cb, make_err_cb(), None) {
+            Ok(stream) => {
+                if channels > 1 {
+                    log::info!("Playout using {channels}-channel config, upmixing from mono");
+                } else {
+                    log::info!("Playout using mono config");
+                }
+                stream.play()?;
+                return Ok(stream);
+            }
+            Err(e) => {
+                log::warn!("Config rejected ({e}), trying next...");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "no supported playout config for device '{dev_name}': {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
