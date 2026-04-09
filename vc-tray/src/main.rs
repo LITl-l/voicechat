@@ -41,6 +41,7 @@ struct LobbyConfig {
     host_addr: String,
     passphrase: String,
     denoise: bool,
+    upnp: bool,
     input_mode_idx: usize,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
@@ -69,6 +70,7 @@ impl VoiceChatApp {
                 host_addr: "127.0.0.1:4567".to_string(),
                 passphrase: String::new(),
                 denoise: false,
+                upnp: true,
                 input_mode_idx: 0,
                 input_devices,
                 output_devices,
@@ -113,6 +115,7 @@ impl VoiceChatApp {
             noise_suppression: self.lobby.denoise,
             input_mode,
             vad_config: vc_core::vad::VadConfig::default(),
+            upnp: self.lobby.is_host && self.lobby.upnp,
         };
 
         let session = Session::new(config);
@@ -139,7 +142,12 @@ impl VoiceChatApp {
     }
 
     fn draw_lobby(&mut self, ui: &mut egui::Ui) {
-        ui.heading("VoiceChat");
+        ui.horizontal(|ui| {
+            ui.heading("VoiceChat");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(option_env!("VC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")));
+            });
+        });
         ui.separator();
 
         ui.horizontal(|ui| {
@@ -170,6 +178,12 @@ impl VoiceChatApp {
                 ui.label("Noise suppression:");
                 ui.checkbox(&mut self.lobby.denoise, "Enable RNNoise");
                 ui.end_row();
+
+                if self.lobby.is_host {
+                    ui.label("UPnP:");
+                    ui.checkbox(&mut self.lobby.upnp, "Auto port-forward");
+                    ui.end_row();
+                }
 
                 ui.label("Input device:");
                 egui::ComboBox::from_id_salt("input_device")
@@ -260,6 +274,17 @@ impl VoiceChatApp {
 
         ui.heading("VoiceChat - Connected");
         ui.separator();
+
+        // Show external address if UPnP mapped
+        if let Ok(ext) = shared.external_addr.lock() {
+            if let Some(addr) = *ext {
+                ui.horizontal(|ui| {
+                    ui.label("Peers connect to:");
+                    ui.strong(addr.to_string());
+                });
+                ui.add_space(4.0);
+            }
+        }
 
         // Controls
         ui.horizontal(|ui| {

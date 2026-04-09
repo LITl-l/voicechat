@@ -9,6 +9,7 @@ pub mod latency;
 pub mod mixer;
 pub mod net;
 pub mod peer;
+pub mod upnp;
 pub mod vad;
 
 use anyhow::{anyhow, Result};
@@ -50,6 +51,8 @@ pub struct SessionConfig {
     pub input_mode: InputMode,
     /// Voice activity detection configuration.
     pub vad_config: VadConfig,
+    /// Attempt UPnP/IGD port forwarding when hosting.
+    pub upnp: bool,
 }
 
 /// Peer information for display in UI.
@@ -72,6 +75,8 @@ pub struct SessionShared {
     // Stats (Session -> UI)
     pub is_transmitting: AtomicBool,
     pub peer_info: Mutex<Vec<PeerDisplayInfo>>,
+    /// External address from UPnP mapping (if successful).
+    pub external_addr: Mutex<Option<SocketAddr>>,
 }
 
 impl SessionShared {
@@ -82,6 +87,7 @@ impl SessionShared {
             input_mode: Mutex::new(mode),
             is_transmitting: AtomicBool::new(false),
             peer_info: Mutex::new(Vec::new()),
+            external_addr: Mutex::new(None),
         }
     }
 }
@@ -142,6 +148,33 @@ impl Session {
         let mut crypto_ctx = CryptoContext::new(&key, session_id);
         let socket = net::UdpSocket::bind(self.config.bind_addr)?;
         log::info!("Bound to {}", socket.local_addr()?);
+
+        // UPnP port forwarding (host only)
+        let _upnp_mapping = if self.config.is_host && self.config.upnp {
+            let local_addr = socket.local_addr()?;
+            // Resolve actual LAN IP if bound to 0.0.0.0
+            let map_addr = if local_addr.ip().is_unspecified() {
+                let ip = resolve_local_ip("8.8.8.8:53".parse().unwrap()).unwrap_or(local_addr.ip());
+                SocketAddr::new(ip, local_addr.port())
+            } else {
+                local_addr
+            };
+            match upnp::UpnpMapping::setup(map_addr) {
+                Ok((ext_addr, mapping)) => {
+                    log::info!("UPnP: peers can connect to {ext_addr}");
+                    if let Ok(mut addr) = self.shared.external_addr.lock() {
+                        *addr = Some(ext_addr);
+                    }
+                    Some(mapping)
+                }
+                Err(e) => {
+                    log::warn!("UPnP failed: {e} — manual port forwarding required");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Audio ring buffers
         let (capture_prod, mut capture_cons) = audio::create_audio_ring_buffer();
