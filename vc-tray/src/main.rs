@@ -41,6 +41,12 @@ struct LobbyConfig {
     passphrase: String,
     denoise: bool,
     input_mode_idx: usize,
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
+    /// 0 = Default, 1..N = specific device (index into input_devices + 1)
+    selected_input: usize,
+    /// 0 = Default, 1..N = specific device (index into output_devices + 1)
+    selected_output: usize,
 }
 
 struct VoiceChatApp {
@@ -62,6 +68,10 @@ impl VoiceChatApp {
                 passphrase: String::new(),
                 denoise: false,
                 input_mode_idx: 0,
+                input_devices: vc_core::audio::list_input_devices().unwrap_or_default(),
+                output_devices: vc_core::audio::list_output_devices().unwrap_or_default(),
+                selected_input: 0,
+                selected_output: 0,
             },
             session_shared: None,
             running: Arc::new(AtomicBool::new(false)),
@@ -83,13 +93,30 @@ impl VoiceChatApp {
             _ => InputMode::AlwaysOn,
         };
 
+        let input_device = if self.lobby.selected_input > 0 {
+            self.lobby
+                .input_devices
+                .get(self.lobby.selected_input - 1)
+                .cloned()
+        } else {
+            None
+        };
+        let output_device = if self.lobby.selected_output > 0 {
+            self.lobby
+                .output_devices
+                .get(self.lobby.selected_output - 1)
+                .cloned()
+        } else {
+            None
+        };
+
         let config = SessionConfig {
             bind_addr,
             passphrase: self.lobby.passphrase.clone(),
             is_host: self.lobby.is_host,
             host_addr,
-            input_device: None,
-            output_device: None,
+            input_device,
+            output_device,
             noise_suppression: self.lobby.denoise,
             input_mode,
             vad_config: vc_core::vad::VadConfig::default(),
@@ -164,7 +191,56 @@ impl VoiceChatApp {
                         ui.selectable_value(&mut self.lobby.input_mode_idx, 2, "Voice Activation");
                     });
                 ui.end_row();
+
+                ui.label("Input device:");
+                let input_label = if self.lobby.selected_input == 0 {
+                    "Default".to_string()
+                } else {
+                    self.lobby
+                        .input_devices
+                        .get(self.lobby.selected_input - 1)
+                        .cloned()
+                        .unwrap_or_else(|| "Default".to_string())
+                };
+                egui::ComboBox::from_id_salt("input_device")
+                    .selected_text(&input_label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.lobby.selected_input, 0, "Default");
+                        for (i, name) in self.lobby.input_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.lobby.selected_input, i + 1, name);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Output device:");
+                let output_label = if self.lobby.selected_output == 0 {
+                    "Default".to_string()
+                } else {
+                    self.lobby
+                        .output_devices
+                        .get(self.lobby.selected_output - 1)
+                        .cloned()
+                        .unwrap_or_else(|| "Default".to_string())
+                };
+                egui::ComboBox::from_id_salt("output_device")
+                    .selected_text(&output_label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.lobby.selected_output, 0, "Default");
+                        for (i, name) in self.lobby.output_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.lobby.selected_output, i + 1, name);
+                        }
+                    });
+                ui.end_row();
             });
+
+        if ui.small_button("Refresh devices").clicked() {
+            self.lobby.input_devices = vc_core::audio::list_input_devices().unwrap_or_default();
+            self.lobby.output_devices = vc_core::audio::list_output_devices().unwrap_or_default();
+            self.lobby.selected_input = 0;
+            self.lobby.selected_output = 0;
+        }
 
         ui.add_space(12.0);
 
