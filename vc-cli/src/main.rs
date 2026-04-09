@@ -47,6 +47,10 @@ enum Command {
         /// Input mode: always-on, ptt, or vox
         #[arg(long, value_enum, default_value_t = InputModeArg::AlwaysOn)]
         input_mode: InputModeArg,
+
+        /// Enable UPnP/IGD automatic port forwarding
+        #[arg(long, default_value_t = true)]
+        upnp: bool,
     },
 
     /// Join an existing voice chat session
@@ -126,6 +130,7 @@ fn main() -> Result<()> {
             output_device,
             denoise,
             input_mode,
+            upnp,
         } => {
             log::info!("Hosting voice chat on {bind}");
             let mode = to_input_mode(&input_mode);
@@ -139,6 +144,7 @@ fn main() -> Result<()> {
                 noise_suppression: denoise,
                 input_mode: mode.clone(),
                 vad_config: vc_core::vad::VadConfig::default(),
+                upnp,
             });
 
             // For PTT mode, spawn a thread to watch for space key in terminal
@@ -176,6 +182,7 @@ fn main() -> Result<()> {
                 noise_suppression: denoise,
                 input_mode: mode.clone(),
                 vad_config: vc_core::vad::VadConfig::default(),
+                upnp: false,
             });
 
             if mode == vc_core::input::InputMode::PushToTalk {

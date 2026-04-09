@@ -38,6 +38,8 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release
+        env:
+          VC_VERSION: ${{ github.ref_name }}
 
       - name: Package binaries (Linux)
         if: runner.os == 'Linux'
