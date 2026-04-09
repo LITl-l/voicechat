@@ -68,14 +68,22 @@ fn candidate_configs(device_default: Option<&StreamConfig>) -> Vec<StreamConfig>
         // 2. Mono, default buffer
         build_stream_config(1, BufferSize::Default),
     ];
-    // 3. Device's native config (may be stereo) with default buffer
     if let Some(dev) = device_default {
         if dev.channels > 1 {
+            // 3. Stereo fallback (most headsets/speakers need at least 2ch)
             configs.push(build_stream_config(
-                dev.channels,
+                2,
                 BufferSize::Fixed(DESIRED_BUFFER_SAMPLES),
             ));
-            configs.push(build_stream_config(dev.channels, BufferSize::Default));
+            configs.push(build_stream_config(2, BufferSize::Default));
+            // 4. Device's native channel count
+            if dev.channels != 2 {
+                configs.push(build_stream_config(
+                    dev.channels,
+                    BufferSize::Fixed(DESIRED_BUFFER_SAMPLES),
+                ));
+                configs.push(build_stream_config(dev.channels, BufferSize::Default));
+            }
         }
     }
     configs
