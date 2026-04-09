@@ -7,6 +7,7 @@ use ringbuf::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::codec::SAMPLE_RATE;
 
@@ -14,8 +15,9 @@ use crate::codec::SAMPLE_RATE;
 /// Used as a hint — falls back to device default if unsupported.
 const DESIRED_BUFFER_SAMPLES: u32 = 96;
 
-/// Ring buffer capacity in f32 samples (enough for ~50ms of audio).
-const RING_BUFFER_CAPACITY: usize = 2400;
+/// Ring buffer capacity in f32 samples (enough for ~200ms of audio).
+/// Sized generously to handle Windows timer granularity (~15.6ms) and scheduling jitter.
+const RING_BUFFER_CAPACITY: usize = 9600;
 
 pub type CaptureProducer = ringbuf::HeapProd<f32>;
 pub type CaptureConsumer = ringbuf::HeapCons<f32>;
@@ -120,6 +122,8 @@ pub fn start_capture(
         let run = running.clone();
 
         let data_cb: InputCb = if channels == 1 {
+            let mut overflow_samples = 0usize;
+            let mut overflow_log_time: Option<Instant> = None;
             Box::new(move |data, _info| {
                 if !run.load(Ordering::Relaxed) {
                     return;
@@ -127,14 +131,23 @@ pub fn start_capture(
                 let mut p = prod.lock().unwrap();
                 let written = p.push_slice(data);
                 if written < data.len() {
-                    log::warn!(
-                        "capture ring buffer overflow: dropped {} samples",
-                        data.len() - written
-                    );
+                    overflow_samples += data.len() - written;
+                    let should_log = overflow_log_time
+                        .map(|t| t.elapsed() >= Duration::from_secs(2))
+                        .unwrap_or(true);
+                    if should_log {
+                        log::warn!(
+                            "capture ring buffer overflow: dropped {overflow_samples} samples total"
+                        );
+                        overflow_samples = 0;
+                        overflow_log_time = Some(Instant::now());
+                    }
                 }
             })
         } else {
             // Downmix multi-channel to mono by averaging
+            let mut overflow_samples = 0usize;
+            let mut overflow_log_time: Option<Instant> = None;
             Box::new(move |data, _info| {
                 if !run.load(Ordering::Relaxed) {
                     return;
@@ -146,10 +159,17 @@ pub fn start_capture(
                 let mut p = prod.lock().unwrap();
                 let written = p.push_slice(&mono);
                 if written < mono.len() {
-                    log::warn!(
-                        "capture ring buffer overflow: dropped {} samples",
-                        mono.len() - written
-                    );
+                    overflow_samples += mono.len() - written;
+                    let should_log = overflow_log_time
+                        .map(|t| t.elapsed() >= Duration::from_secs(2))
+                        .unwrap_or(true);
+                    if should_log {
+                        log::warn!(
+                            "capture ring buffer overflow: dropped {overflow_samples} samples total"
+                        );
+                        overflow_samples = 0;
+                        overflow_log_time = Some(Instant::now());
+                    }
                 }
             })
         };
