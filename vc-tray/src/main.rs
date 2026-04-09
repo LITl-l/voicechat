@@ -3,6 +3,7 @@ use eframe::egui;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use vc_core::audio;
 use vc_core::input::InputMode;
 use vc_core::peer::PeerState;
 use vc_core::{PeerDisplayInfo, Session, SessionConfig, SessionShared};
@@ -41,6 +42,10 @@ struct LobbyConfig {
     passphrase: String,
     denoise: bool,
     input_mode_idx: usize,
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
+    selected_input: usize,  // 0 = Default, 1.. = specific device
+    selected_output: usize, // 0 = Default, 1.. = specific device
 }
 
 struct VoiceChatApp {
@@ -53,6 +58,9 @@ struct VoiceChatApp {
 
 impl VoiceChatApp {
     fn new() -> Self {
+        let input_devices = audio::list_input_devices().unwrap_or_default();
+        let output_devices = audio::list_output_devices().unwrap_or_default();
+
         Self {
             state: AppState::Lobby,
             lobby: LobbyConfig {
@@ -62,6 +70,10 @@ impl VoiceChatApp {
                 passphrase: String::new(),
                 denoise: false,
                 input_mode_idx: 0,
+                input_devices,
+                output_devices,
+                selected_input: 0,
+                selected_output: 0,
             },
             session_shared: None,
             running: Arc::new(AtomicBool::new(false)),
@@ -88,8 +100,16 @@ impl VoiceChatApp {
             passphrase: self.lobby.passphrase.clone(),
             is_host: self.lobby.is_host,
             host_addr,
-            input_device: None,
-            output_device: None,
+            input_device: if self.lobby.selected_input == 0 {
+                None
+            } else {
+                Some(self.lobby.input_devices[self.lobby.selected_input - 1].clone())
+            },
+            output_device: if self.lobby.selected_output == 0 {
+                None
+            } else {
+                Some(self.lobby.output_devices[self.lobby.selected_output - 1].clone())
+            },
             noise_suppression: self.lobby.denoise,
             input_mode,
             vad_config: vc_core::vad::VadConfig::default(),
@@ -149,6 +169,38 @@ impl VoiceChatApp {
 
                 ui.label("Noise suppression:");
                 ui.checkbox(&mut self.lobby.denoise, "Enable RNNoise");
+                ui.end_row();
+
+                ui.label("Input device:");
+                egui::ComboBox::from_id_salt("input_device")
+                    .selected_text(if self.lobby.selected_input == 0 {
+                        "Default"
+                    } else {
+                        &self.lobby.input_devices[self.lobby.selected_input - 1]
+                    })
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.lobby.selected_input, 0, "Default");
+                        for (i, name) in self.lobby.input_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.lobby.selected_input, i + 1, name);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Output device:");
+                egui::ComboBox::from_id_salt("output_device")
+                    .selected_text(if self.lobby.selected_output == 0 {
+                        "Default"
+                    } else {
+                        &self.lobby.output_devices[self.lobby.selected_output - 1]
+                    })
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.lobby.selected_output, 0, "Default");
+                        for (i, name) in self.lobby.output_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.lobby.selected_output, i + 1, name);
+                        }
+                    });
                 ui.end_row();
 
                 ui.label("Input mode:");
