@@ -232,7 +232,7 @@ impl Session {
             }
 
             // --- Capture -> [Noise Suppression] -> [VAD/Gate] -> Encode -> Encrypt -> Send ---
-            let mut temp_buf = [0.0f32; 256];
+            let mut temp_buf = [0.0f32; 4800];
             let read = capture_cons.pop_slice(&mut temp_buf);
             if read > 0 {
                 capture_accum.extend_from_slice(&temp_buf[..read]);
@@ -759,7 +759,7 @@ pub fn run_loopback(
     noise_suppressor.set_enabled(noise_suppression);
 
     let mut accum = Vec::with_capacity(FRAME_SAMPLES);
-    let mut temp = [0.0f32; 256];
+    let mut temp = [0.0f32; 4800];
 
     log::info!(
         "Loopback test running (noise suppression: {}, Ctrl+C to stop)",
