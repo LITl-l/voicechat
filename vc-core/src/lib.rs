@@ -533,7 +533,7 @@ impl Session {
                 if !peer_mgr.is_host {
                     return Err(anyhow!("non-host received JOIN"));
                 }
-                let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
+                let psk_ctx = CryptoContext::new(key, [0; 8]);
                 let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, 0, 0, 0)?;
                 let _join = JoinPayload::from_bytes(&plaintext)?;
 
@@ -558,7 +558,7 @@ impl Session {
                 let pl_bytes = pl.to_bytes();
                 let hdr = PacketHeader::new(PKT_PEER_LIST, local_id, 0, 0);
                 let hdr_bytes = hdr.to_bytes();
-                let mut psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
+                let mut psk_ctx = CryptoContext::new(key, [0; 8]);
                 let (encrypted, _) = psk_ctx.encrypt(&hdr_bytes, &pl_bytes, local_id, 0)?;
                 let wire = build_wire_packet(&hdr_bytes, &encrypted);
                 socket.send_to(&wire, src_addr)?;
