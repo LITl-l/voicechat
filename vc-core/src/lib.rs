@@ -622,15 +622,23 @@ impl Session {
                     if *id == my_id {
                         continue;
                     }
-                    peer_mgr.add_peer(*id, *addr)?;
+                    // For the peer that sent us the PEER_LIST (the host),
+                    // use the actual source address instead of the listed
+                    // address which may be a LAN IP behind NAT.
+                    let peer_addr = if *id == header.peer_id {
+                        src_addr
+                    } else {
+                        *addr
+                    };
+                    peer_mgr.add_peer(*id, peer_addr)?;
 
                     let hdr = PacketHeader::new(PKT_HELLO, my_id, 0, 0);
                     let hdr_bytes = hdr.to_bytes();
                     let mut psk_ctx = CryptoContext::new(key, pl.session_id);
                     let (encrypted, _) = psk_ctx.encrypt(&hdr_bytes, &[], my_id, 0)?;
                     let wire = build_wire_packet(&hdr_bytes, &encrypted);
-                    socket.send_to(&wire, *addr)?;
-                    log::info!("Sent HELLO to peer {id} at {addr}");
+                    socket.send_to(&wire, peer_addr)?;
+                    log::info!("Sent HELLO to peer {id} at {peer_addr}");
 
                     if let Some(peer) = peer_mgr.get_peer_mut(*id) {
                         peer.state = PeerState::HelloSent;
