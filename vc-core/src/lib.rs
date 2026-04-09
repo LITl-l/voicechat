@@ -13,10 +13,18 @@ pub mod vad;
 
 use anyhow::{anyhow, Result};
 use ringbuf::traits::{Consumer, Producer};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Determine our routable local IP for reaching a given remote address.
+/// Uses the OS routing table via a temporary connected UDP socket (no data sent).
+fn resolve_local_ip(remote: SocketAddr) -> Option<IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(remote).ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
+}
 
 use codec::{FRAME_DURATION_US, FRAME_SAMPLES};
 use crypto::CryptoContext;
@@ -537,8 +545,16 @@ impl Session {
                 }
 
                 let local_addr = socket.local_addr()?;
+                // If bound to 0.0.0.0, resolve our actual routable IP for this peer
+                let host_addr = if local_addr.ip().is_unspecified() {
+                    let ip = resolve_local_ip(src_addr)
+                        .ok_or_else(|| anyhow!("cannot determine local IP for peer list"))?;
+                    SocketAddr::new(ip, local_addr.port())
+                } else {
+                    local_addr
+                };
                 let local_id = peer_mgr.local_id;
-                let pl = peer_mgr.build_peer_list(local_addr);
+                let pl = peer_mgr.build_peer_list(host_addr);
                 let pl_bytes = pl.to_bytes();
                 let hdr = PacketHeader::new(PKT_PEER_LIST, local_id, 0, 0);
                 let hdr_bytes = hdr.to_bytes();
