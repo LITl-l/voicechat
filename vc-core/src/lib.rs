@@ -209,7 +209,11 @@ impl Session {
         // Phase 4: X25519 key exchange
         let key_exchange = KeyExchange::new();
 
-        // If joining, send JOIN to host
+        // If joining, send JOIN to host.
+        //
+        // Uses a fresh zero-session crypto context (counter=0, session_id=0)
+        // because the joiner doesn't yet know the session_id — that's exactly
+        // what the host expects to decrypt this initial packet with.
         if !self.config.is_host {
             if let Some(host_addr) = self.config.host_addr {
                 let join_payload = JoinPayload {
@@ -219,8 +223,8 @@ impl Session {
                 let header_bytes = header.to_bytes();
                 let payload_bytes = join_payload.to_bytes();
 
-                let (encrypted, _counter) =
-                    crypto_ctx.encrypt(&header_bytes, &payload_bytes, 0, 0)?;
+                let psk_ctx = CryptoContext::new(&key, [0; 8]);
+                let encrypted = psk_ctx.encrypt(&header_bytes, &payload_bytes, 0, 0, 0)?;
                 let wire = build_wire_packet(&header_bytes, &encrypted);
                 socket.send_to(&wire, host_addr)?;
                 log::info!("Sent JOIN to {host_addr}");
@@ -313,34 +317,59 @@ impl Session {
                                 for (peer_id, peer_addr) in &connected {
                                     if let Some(peer) = peer_mgr.get_peer_mut(*peer_id) {
                                         let seq = peer.next_seq();
-                                        let ts = peer.advance_timestamp();
-                                        let header =
-                                            PacketHeader::new(PKT_AUDIO, local_id, seq, ts);
-                                        let header_bytes = header.to_bytes();
 
-                                        // Use per-peer key if key exchange is complete
+                                        // Use per-peer key if key exchange is complete.
                                         let use_peer_key = peer.kx_sent
                                             && peer.kx_received
                                             && peer.peer_crypto.is_some();
 
+                                        // Reserve the monotonic counter *before*
+                                        // building the header so the AAD and
+                                        // the XChaCha20 nonce agree on the same
+                                        // value. Receiver reads header.counter.
                                         let encrypt_result = if use_peer_key {
-                                            peer.peer_crypto.as_mut().unwrap().encrypt(
-                                                &header_bytes,
-                                                &opus_data,
-                                                local_id,
-                                                seq,
-                                            )
+                                            let peer_ctx = peer.peer_crypto.as_mut().unwrap();
+                                            match peer_ctx.next_counter() {
+                                                Ok(counter) => {
+                                                    let header = PacketHeader::new(
+                                                        PKT_AUDIO, local_id, seq, counter,
+                                                    );
+                                                    let header_bytes = header.to_bytes();
+                                                    peer_ctx
+                                                        .encrypt(
+                                                            &header_bytes,
+                                                            &opus_data,
+                                                            local_id,
+                                                            seq,
+                                                            counter,
+                                                        )
+                                                        .map(|ct| (header_bytes, ct))
+                                                }
+                                                Err(e) => Err(e),
+                                            }
                                         } else {
-                                            crypto_ctx.encrypt(
-                                                &header_bytes,
-                                                &opus_data,
-                                                local_id,
-                                                seq,
-                                            )
+                                            match crypto_ctx.next_counter() {
+                                                Ok(counter) => {
+                                                    let header = PacketHeader::new(
+                                                        PKT_AUDIO, local_id, seq, counter,
+                                                    );
+                                                    let header_bytes = header.to_bytes();
+                                                    crypto_ctx
+                                                        .encrypt(
+                                                            &header_bytes,
+                                                            &opus_data,
+                                                            local_id,
+                                                            seq,
+                                                            counter,
+                                                        )
+                                                        .map(|ct| (header_bytes, ct))
+                                                }
+                                                Err(e) => Err(e),
+                                            }
                                         };
 
                                         match encrypt_result {
-                                            Ok((encrypted, _counter)) => {
+                                            Ok((header_bytes, encrypted)) => {
                                                 let wire =
                                                     build_wire_packet(&header_bytes, &encrypted);
                                                 if let Err(e) = socket.send_to(&wire, *peer_addr) {
@@ -396,10 +425,17 @@ impl Session {
                 let local_id = peer_mgr.local_id;
                 let connected = peer_mgr.connected_peers();
                 for (_peer_id, peer_addr) in &connected {
-                    let header = PacketHeader::new(PKT_KEEPALIVE, local_id, 0, 0);
+                    let counter = match crypto_ctx.next_counter() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::debug!("keepalive counter: {e}");
+                            continue;
+                        }
+                    };
+                    let header = PacketHeader::new(PKT_KEEPALIVE, local_id, 0, counter);
                     let header_bytes = header.to_bytes();
-                    match crypto_ctx.encrypt(&header_bytes, &[], local_id, 0) {
-                        Ok((encrypted, _)) => {
+                    match crypto_ctx.encrypt(&header_bytes, &[], local_id, 0, counter) {
+                        Ok(encrypted) => {
                             let wire = build_wire_packet(&header_bytes, &encrypted);
                             let _ = socket.send_to(&wire, *peer_addr);
                         }
@@ -415,22 +451,31 @@ impl Session {
                 let local_id = peer_mgr.local_id;
                 let connected = peer_mgr.connected_peers();
                 for (peer_id, peer_addr) in &connected {
-                    if let Some(peer) = peer_mgr.get_peer_mut(*peer_id) {
-                        let ping_id = peer.latency_tracker.ping_sent();
-                        let payload = PingPayload { ping_id }.to_bytes();
-                        let header = PacketHeader::new(PKT_PING, local_id, 0, 0);
-                        let header_bytes = header.to_bytes();
-                        match crypto_ctx.encrypt(&header_bytes, &payload, local_id, 0) {
-                            Ok((encrypted, _)) => {
-                                let wire = build_wire_packet(&header_bytes, &encrypted);
-                                let _ = socket.send_to(&wire, *peer_addr);
-                            }
-                            Err(e) => log::debug!("ping encrypt: {e}"),
+                    let ping_id = match peer_mgr.get_peer_mut(*peer_id) {
+                        Some(peer) => peer.latency_tracker.ping_sent(),
+                        None => continue,
+                    };
+                    let payload = PingPayload { ping_id }.to_bytes();
+                    let counter = match crypto_ctx.next_counter() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::debug!("ping counter: {e}");
+                            continue;
                         }
+                    };
+                    let header = PacketHeader::new(PKT_PING, local_id, 0, counter);
+                    let header_bytes = header.to_bytes();
+                    match crypto_ctx.encrypt(&header_bytes, &payload, local_id, 0, counter) {
+                        Ok(encrypted) => {
+                            let wire = build_wire_packet(&header_bytes, &encrypted);
+                            let _ = socket.send_to(&wire, *peer_addr);
+                        }
+                        Err(e) => log::debug!("ping encrypt: {e}"),
                     }
                 }
 
-                // Send KEY_EXCHANGE to newly connected peers that haven't received it
+                // Send KEY_EXCHANGE to newly connected peers that haven't received it.
+                // Fresh psk_ctx per send means counter is always 0.
                 let connected = peer_mgr.connected_peers();
                 for (peer_id, peer_addr) in &connected {
                     let needs_kx = peer_mgr
@@ -444,9 +489,9 @@ impl Session {
                         let kx_bytes = kx_payload.to_bytes();
                         let hdr = PacketHeader::new(PKT_KEY_EXCHANGE, local_id, 0, 0);
                         let hdr_bytes = hdr.to_bytes();
-                        let mut psk_ctx = CryptoContext::new(&key, peer_mgr.session_id);
-                        if let Ok((encrypted, _)) =
-                            psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0)
+                        let psk_ctx = CryptoContext::new(&key, peer_mgr.session_id);
+                        if let Ok(encrypted) =
+                            psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0, 0)
                         {
                             let wire = build_wire_packet(&hdr_bytes, &encrypted);
                             let _ = socket.send_to(&wire, *peer_addr);
@@ -510,15 +555,18 @@ impl Session {
         match header.pkt_type {
             PKT_AUDIO => {
                 let peer_id = header.peer_id;
-                let counter = header.seq_num as u32;
+                // Counter is carried in the header by the sender (AAD-authenticated).
+                let counter = header.counter;
 
-                // Try per-peer key first if key exchange is complete, fall back to PSK
+                // Try per-peer key first if key exchange is complete, fall
+                // back to the PSK context. The PSK path is needed for audio
+                // sent before the sender upgraded to PFS.
                 let try_peer_first = peer_mgr
                     .get_peer(peer_id)
                     .map(|p| p.kx_received && p.peer_crypto.is_some())
                     .unwrap_or(false);
 
-                let plaintext = if try_peer_first {
+                let (plaintext, used_peer_ctx) = if try_peer_first {
                     let peer_ctx = peer_mgr
                         .get_peer(peer_id)
                         .and_then(|p| p.peer_crypto.as_ref())
@@ -530,31 +578,42 @@ impl Session {
                         header.seq_num,
                         counter,
                     ) {
-                        Ok(pt) => pt,
+                        Ok(pt) => (pt, true),
                         Err(_) => {
-                            // Fall back to PSK (peer may not have upgraded yet)
-                            crypto_ctx.decrypt(
+                            // Fall back to PSK (peer may not have upgraded yet).
+                            let pt = crypto_ctx.decrypt(
                                 &header_bytes,
                                 ciphertext,
                                 peer_id,
                                 header.seq_num,
                                 counter,
-                            )?
+                            )?;
+                            (pt, false)
                         }
                     }
                 } else {
-                    crypto_ctx.decrypt(
+                    let pt = crypto_ctx.decrypt(
                         &header_bytes,
                         ciphertext,
                         peer_id,
                         header.seq_num,
                         counter,
-                    )?
+                    )?;
+                    (pt, false)
                 };
 
                 if let Some(peer) = peer_mgr.get_peer_mut(peer_id) {
                     peer.touch();
-                    if !peer.replay_filter.check_and_accept(counter) {
+                    // Per-context replay filters: the PSK and PFS senders each
+                    // use their own monotonic counter, so we track replay state
+                    // per-context to avoid rejecting legitimate PFS packets
+                    // whose counter restarts from 0 after upgrade.
+                    let filter = if used_peer_ctx {
+                        &mut peer.peer_replay_filter
+                    } else {
+                        &mut peer.replay_filter
+                    };
+                    if !filter.check_and_accept(counter) {
                         return Err(anyhow!("replay detected for peer {peer_id}"));
                     }
                     let pcm = peer.decoder.decode(&plaintext)?;
@@ -567,7 +626,13 @@ impl Session {
                     return Err(anyhow!("non-host received JOIN"));
                 }
                 let psk_ctx = CryptoContext::new(key, [0; 8]);
-                let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, 0, 0, 0)?;
+                let plaintext = psk_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
                 let _join = JoinPayload::from_bytes(&plaintext)?;
 
                 let new_id = peer_mgr.allocate_peer_id()?;
@@ -591,8 +656,8 @@ impl Session {
                 let pl_bytes = pl.to_bytes();
                 let hdr = PacketHeader::new(PKT_PEER_LIST, local_id, 0, 0);
                 let hdr_bytes = hdr.to_bytes();
-                let mut psk_ctx = CryptoContext::new(key, [0; 8]);
-                let (encrypted, _) = psk_ctx.encrypt(&hdr_bytes, &pl_bytes, local_id, 0)?;
+                let psk_ctx = CryptoContext::new(key, [0; 8]);
+                let encrypted = psk_ctx.encrypt(&hdr_bytes, &pl_bytes, local_id, 0, 0)?;
                 let wire = build_wire_packet(&hdr_bytes, &encrypted);
                 socket.send_to(&wire, src_addr)?;
                 log::info!("Peer {new_id} joined from {src_addr}");
@@ -600,7 +665,13 @@ impl Session {
 
             PKT_PEER_LIST => {
                 let psk_ctx = CryptoContext::new(key, [0; 8]);
-                let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = psk_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
                 let pl = PeerListPayload::from_bytes(&plaintext)?;
 
                 let my_id = pl
@@ -634,8 +705,8 @@ impl Session {
 
                     let hdr = PacketHeader::new(PKT_HELLO, my_id, 0, 0);
                     let hdr_bytes = hdr.to_bytes();
-                    let mut psk_ctx = CryptoContext::new(key, pl.session_id);
-                    let (encrypted, _) = psk_ctx.encrypt(&hdr_bytes, &[], my_id, 0)?;
+                    let psk_ctx = CryptoContext::new(key, pl.session_id);
+                    let encrypted = psk_ctx.encrypt(&hdr_bytes, &[], my_id, 0, 0)?;
                     let wire = build_wire_packet(&hdr_bytes, &encrypted);
                     socket.send_to(&wire, peer_addr)?;
                     log::info!("Sent HELLO to peer {id} at {peer_addr}");
@@ -648,7 +719,13 @@ impl Session {
 
             PKT_HELLO => {
                 let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
-                psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                psk_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
 
                 let peer_id = header.peer_id;
                 if peer_mgr.get_peer(peer_id).is_none() {
@@ -662,8 +739,8 @@ impl Session {
                 let local_id = peer_mgr.local_id;
                 let hdr = PacketHeader::new(PKT_HELLO_ACK, local_id, 0, 0);
                 let hdr_bytes = hdr.to_bytes();
-                let mut psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
-                let (encrypted, _) = psk_ctx.encrypt(&hdr_bytes, &[], local_id, 0)?;
+                let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
+                let encrypted = psk_ctx.encrypt(&hdr_bytes, &[], local_id, 0, 0)?;
                 let wire = build_wire_packet(&hdr_bytes, &encrypted);
                 socket.send_to(&wire, src_addr)?;
                 log::info!("Received HELLO from peer {peer_id}, sent HELLO_ACK");
@@ -671,7 +748,13 @@ impl Session {
 
             PKT_HELLO_ACK => {
                 let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
-                psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                psk_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
 
                 let peer_id = header.peer_id;
                 if let Some(peer) = peer_mgr.get_peer_mut(peer_id) {
@@ -691,16 +774,28 @@ impl Session {
 
             PKT_PING => {
                 // Decrypt, parse ping_id, send PONG back
-                let plaintext =
-                    crypto_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = crypto_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
                 let ping = PingPayload::from_bytes(&plaintext)?;
 
                 let local_id = peer_mgr.local_id;
                 let pong_payload = ping.to_bytes();
-                let hdr = PacketHeader::new(PKT_PONG, local_id, 0, 0);
+                let pong_counter = match crypto_ctx.next_counter() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::debug!("pong counter: {e}");
+                        return Ok(());
+                    }
+                };
+                let hdr = PacketHeader::new(PKT_PONG, local_id, 0, pong_counter);
                 let hdr_bytes = hdr.to_bytes();
-                match crypto_ctx.encrypt(&hdr_bytes, &pong_payload, local_id, 0) {
-                    Ok((encrypted, _)) => {
+                match crypto_ctx.encrypt(&hdr_bytes, &pong_payload, local_id, 0, pong_counter) {
+                    Ok(encrypted) => {
                         let wire = build_wire_packet(&hdr_bytes, &encrypted);
                         let _ = socket.send_to(&wire, src_addr);
                     }
@@ -715,8 +810,13 @@ impl Session {
             }
 
             PKT_PONG => {
-                let plaintext =
-                    crypto_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = crypto_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
                 let pong = PingPayload::from_bytes(&plaintext)?;
 
                 let peer_id = header.peer_id;
@@ -734,7 +834,13 @@ impl Session {
 
             PKT_KEY_EXCHANGE => {
                 let psk_ctx = CryptoContext::new(key, peer_mgr.session_id);
-                let plaintext = psk_ctx.decrypt(&header_bytes, ciphertext, header.peer_id, 0, 0)?;
+                let plaintext = psk_ctx.decrypt(
+                    &header_bytes,
+                    ciphertext,
+                    header.peer_id,
+                    header.seq_num,
+                    header.counter,
+                )?;
                 let kx = KeyExchangePayload::from_bytes(&plaintext)?;
 
                 let peer_id = header.peer_id;
@@ -765,9 +871,8 @@ impl Session {
                     let kx_bytes = kx_payload.to_bytes();
                     let hdr = PacketHeader::new(PKT_KEY_EXCHANGE, local_id, 0, 0);
                     let hdr_bytes = hdr.to_bytes();
-                    let mut psk_ctx = CryptoContext::new(key, session_id);
-                    if let Ok((encrypted, _)) = psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0)
-                    {
+                    let psk_ctx = CryptoContext::new(key, session_id);
+                    if let Ok(encrypted) = psk_ctx.encrypt(&hdr_bytes, &kx_bytes, local_id, 0, 0) {
                         let wire = build_wire_packet(&hdr_bytes, &encrypted);
                         let _ = socket.send_to(&wire, src_addr);
                         if let Some(peer) = peer_mgr.get_peer_mut(peer_id) {
