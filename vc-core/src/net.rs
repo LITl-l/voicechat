@@ -16,21 +16,26 @@ pub const HEADER_LEN: usize = 8;
 pub const MAX_PACKET_LEN: usize = 1200; // well under MTU
 
 /// 8-byte packet header.
+///
+/// The `counter` field carries the per-sender monotonic nonce counter so the
+/// receiver can reconstruct the exact XChaCha20 nonce used to encrypt the
+/// packet. It is authenticated as part of the AEAD AAD (via `to_bytes()`)
+/// so a tampered counter causes decrypt to fail.
 #[derive(Clone, Copy, Debug)]
 pub struct PacketHeader {
     pub pkt_type: u8,
     pub peer_id: u8,
     pub seq_num: u16,
-    pub timestamp: u32,
+    pub counter: u32,
 }
 
 impl PacketHeader {
-    pub fn new(pkt_type: u8, peer_id: u8, seq_num: u16, timestamp: u32) -> Self {
+    pub fn new(pkt_type: u8, peer_id: u8, seq_num: u16, counter: u32) -> Self {
         Self {
             pkt_type,
             peer_id,
             seq_num,
-            timestamp,
+            counter,
         }
     }
 
@@ -39,7 +44,7 @@ impl PacketHeader {
         buf[0] = self.pkt_type;
         buf[1] = self.peer_id;
         buf[2..4].copy_from_slice(&self.seq_num.to_be_bytes());
-        buf[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
+        buf[4..8].copy_from_slice(&self.counter.to_be_bytes());
         buf
     }
 
@@ -51,7 +56,7 @@ impl PacketHeader {
             pkt_type: buf[0],
             peer_id: buf[1],
             seq_num: u16::from_be_bytes([buf[2], buf[3]]),
-            timestamp: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            counter: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
         })
     }
 }
@@ -247,7 +252,7 @@ mod tests {
         assert_eq!(parsed.pkt_type, PKT_AUDIO);
         assert_eq!(parsed.peer_id, 2);
         assert_eq!(parsed.seq_num, 1234);
-        assert_eq!(parsed.timestamp, 56789);
+        assert_eq!(parsed.counter, 56789);
     }
 
     #[test]

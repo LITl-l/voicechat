@@ -31,12 +31,16 @@ pub struct RemotePeer {
     pub state: PeerState,
     pub jitter_buffer: JitterBuffer,
     pub decoder: codec::Decoder,
+    /// Replay filter for audio received via the shared PSK crypto context.
     pub replay_filter: ReplayFilter,
+    /// Replay filter for audio received via the per-peer (PFS) crypto context.
+    /// Kept separate from `replay_filter` because each sender context has its
+    /// own monotonic counter — after the PFS upgrade the PFS counter restarts
+    /// at 0, which a single filter would reject as "too old".
+    pub peer_replay_filter: ReplayFilter,
     pub last_seen: Instant,
-    /// Sequence number for outbound packets to this peer.
+    /// Sequence number for outbound audio packets to this peer.
     pub send_seq: u16,
-    /// Sample timestamp counter.
-    pub send_timestamp: u32,
     /// Latency measurement tracker.
     pub latency_tracker: LatencyTracker,
     /// Per-peer crypto context derived from X25519 key exchange.
@@ -56,9 +60,9 @@ impl RemotePeer {
             jitter_buffer: JitterBuffer::new(),
             decoder: codec::Decoder::new()?,
             replay_filter: ReplayFilter::new(),
+            peer_replay_filter: ReplayFilter::new(),
             last_seen: Instant::now(),
             send_seq: 0,
-            send_timestamp: 0,
             latency_tracker: LatencyTracker::new(),
             peer_crypto: None,
             kx_sent: false,
@@ -82,14 +86,6 @@ impl RemotePeer {
         let seq = self.send_seq;
         self.send_seq = self.send_seq.wrapping_add(1);
         seq
-    }
-
-    pub fn advance_timestamp(&mut self) -> u32 {
-        let ts = self.send_timestamp;
-        self.send_timestamp = self
-            .send_timestamp
-            .wrapping_add(codec::FRAME_SAMPLES as u32);
-        ts
     }
 }
 

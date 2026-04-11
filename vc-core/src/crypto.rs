@@ -73,25 +73,37 @@ impl CryptoContext {
         }
     }
 
-    /// Encrypts an audio packet in-place.
+    /// Reserve and return the next monotonic counter value.
     ///
-    /// `header` (8 bytes) is sent in cleartext but authenticated (AAD).
-    /// `payload` is the Opus data to encrypt.
-    ///
-    /// Returns: (encrypted_payload_with_tag, counter_used)
-    pub fn encrypt(
-        &mut self,
-        header: &[u8; 8],
-        payload: &[u8],
-        peer_id: u8,
-        seq_num: u16,
-    ) -> Result<(Vec<u8>, u32)> {
+    /// The caller must stamp this value into the `counter` field of the
+    /// packet header *before* calling [`CryptoContext::encrypt`], so the
+    /// AAD and the XChaCha20 nonce agree on the same counter. The receiver
+    /// then reads `header.counter` to reconstruct the nonce.
+    pub fn next_counter(&mut self) -> Result<u32> {
         let counter = self.send_counter;
         self.send_counter = self
             .send_counter
             .checked_add(1)
             .ok_or_else(|| anyhow!("send counter overflow"))?;
+        Ok(counter)
+    }
 
+    /// Encrypts a packet payload.
+    ///
+    /// `header` (8 bytes) is sent in cleartext but authenticated (AAD). The
+    /// caller must have already placed `counter` into the `counter` field of
+    /// the header so the receiver can reconstruct the nonce.
+    ///
+    /// `payload` is the plaintext to encrypt (Opus data for audio, or a
+    /// control-packet payload).
+    pub fn encrypt(
+        &self,
+        header: &[u8; 8],
+        payload: &[u8],
+        peer_id: u8,
+        seq_num: u16,
+        counter: u32,
+    ) -> Result<Vec<u8>> {
         let nonce_bytes = build_nonce(&self.session_id, peer_id, Direction::Send, seq_num, counter);
         let nonce = XNonce::from_slice(&nonce_bytes);
 
@@ -106,7 +118,7 @@ impl CryptoContext {
             )
             .map_err(|e| anyhow!("encrypt failed: {e}"))?;
 
-        Ok((ciphertext, counter))
+        Ok(ciphertext)
     }
 
     /// Decrypts and authenticates an audio packet.
@@ -201,10 +213,12 @@ mod tests {
         let mut sender = CryptoContext::new(&key, session_id);
         let receiver = CryptoContext::new(&key, session_id);
 
-        let header = [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x78];
+        let counter = sender.next_counter().unwrap();
+        // Header carries the counter so the AAD matches on both sides.
+        let header = [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, counter as u8];
         let payload = b"hello opus data";
 
-        let (ciphertext, counter) = sender.encrypt(&header, payload, 0, 1).unwrap();
+        let ciphertext = sender.encrypt(&header, payload, 0, 1, counter).unwrap();
         let decrypted = receiver
             .decrypt(&header, &ciphertext, 0, 1, counter)
             .unwrap();
@@ -219,15 +233,36 @@ mod tests {
         let mut sender = CryptoContext::new(&key, session_id);
         let receiver = CryptoContext::new(&key, session_id);
 
-        let header = [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x78];
+        let counter = sender.next_counter().unwrap();
+        let header = [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, counter as u8];
         let payload = b"hello opus data";
 
-        let (ciphertext, counter) = sender.encrypt(&header, payload, 0, 1).unwrap();
+        let ciphertext = sender.encrypt(&header, payload, 0, 1, counter).unwrap();
 
         let mut bad_header = header;
         bad_header[1] = 0xFF;
         assert!(receiver
             .decrypt(&bad_header, &ciphertext, 0, 1, counter)
+            .is_err());
+    }
+
+    #[test]
+    fn test_counter_mismatch_fails() {
+        // Regression test: if sender and receiver use different counters,
+        // decrypt must fail (this was the bug that silently dropped every
+        // audio packet after the first non-audio send).
+        let key = derive_key_from_passphrase("test-password").unwrap();
+        let session_id = [2u8; 8];
+        let mut sender = CryptoContext::new(&key, session_id);
+        let receiver = CryptoContext::new(&key, session_id);
+
+        let counter = sender.next_counter().unwrap();
+        let header = [0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, counter as u8];
+        let payload = b"audio frame";
+
+        let ciphertext = sender.encrypt(&header, payload, 0, 5, counter).unwrap();
+        assert!(receiver
+            .decrypt(&header, &ciphertext, 0, 5, counter.wrapping_add(1))
             .is_err());
     }
 
