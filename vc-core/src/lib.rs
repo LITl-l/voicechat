@@ -394,12 +394,16 @@ impl Session {
                 .store(input_gate.is_transmitting(), Ordering::Relaxed);
 
             // --- Decode + Mix -> Playout ---
-            // Gate at frame rate (~400Hz) so we only pop from the jitter
-            // buffer when it's actually time to play the next frame.
-            // Without this, the 1ms recv-loop polls the buffer at ~1000Hz,
-            // generating PLC concealment on ~60% of iterations and causing
-            // choppy audio.
-            if last_playout.elapsed() >= Duration::from_micros(FRAME_DURATION_US) {
+            // Gate at frame rate (~400Hz) to prevent the jitter buffer
+            // sequence counter racing ahead of actual frame arrivals.
+            //
+            // Uses `while` + `+=` so missed slots (e.g. when recv_from
+            // blocks >2.5ms on Windows) are caught up immediately rather
+            // than lost, preventing ring-buffer underruns.
+            let playout_interval = Duration::from_micros(FRAME_DURATION_US);
+            while last_playout.elapsed() >= playout_interval {
+                last_playout += playout_interval;
+
                 let mut mixed = vec![0.0f32; FRAME_SAMPLES];
                 let mut peer_bufs: Vec<Vec<f32>> = Vec::new();
 
@@ -411,10 +415,20 @@ impl Session {
                         Some(pcm_i16) => {
                             peer_bufs.push(codec::i16_to_f32(&pcm_i16));
                         }
-                        None => match peer.decoder.decode_plc() {
-                            Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
-                            Err(e) => log::debug!("PLC error for peer {}: {e}", peer.id),
-                        },
+                        None => {
+                            // Only PLC when the buffer has frames but the
+                            // expected one is missing (genuine packet loss).
+                            // Skip when buffer is empty — we've caught up
+                            // to the sender or no data yet.
+                            if peer.jitter_buffer.buffered_frames() > 0 {
+                                match peer.decoder.decode_plc() {
+                                    Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
+                                    Err(e) => {
+                                        log::debug!("PLC error for peer {}: {e}", peer.id)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -426,7 +440,9 @@ impl Session {
                         log::debug!("playout ring buffer full, dropped samples");
                     }
                 }
-
+            }
+            // Reset if clock drifted too far to prevent infinite catch-up
+            if last_playout.elapsed() >= Duration::from_millis(50) {
                 last_playout = Instant::now();
             }
 
