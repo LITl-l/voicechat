@@ -234,6 +234,7 @@ impl Session {
         let mut capture_accum = Vec::with_capacity(FRAME_SAMPLES);
         let mut recv_buf = [0u8; MAX_PACKET_LEN];
 
+        let mut last_playout = Instant::now();
         let mut last_keepalive = Instant::now();
         let mut last_adapt = Instant::now();
         let mut last_ping = Instant::now();
@@ -393,31 +394,40 @@ impl Session {
                 .store(input_gate.is_transmitting(), Ordering::Relaxed);
 
             // --- Decode + Mix -> Playout ---
-            let mut mixed = vec![0.0f32; FRAME_SAMPLES];
-            let mut peer_bufs: Vec<Vec<f32>> = Vec::new();
+            // Gate at frame rate (~400Hz) so we only pop from the jitter
+            // buffer when it's actually time to play the next frame.
+            // Without this, the 1ms recv-loop polls the buffer at ~1000Hz,
+            // generating PLC concealment on ~60% of iterations and causing
+            // choppy audio.
+            if last_playout.elapsed() >= Duration::from_micros(FRAME_DURATION_US) {
+                let mut mixed = vec![0.0f32; FRAME_SAMPLES];
+                let mut peer_bufs: Vec<Vec<f32>> = Vec::new();
 
-            for peer in peer_mgr.peers.values_mut() {
-                if peer.state != PeerState::Connected {
-                    continue;
-                }
-                match peer.jitter_buffer.pop() {
-                    Some(pcm_i16) => {
-                        peer_bufs.push(codec::i16_to_f32(&pcm_i16));
+                for peer in peer_mgr.peers.values_mut() {
+                    if peer.state != PeerState::Connected {
+                        continue;
                     }
-                    None => match peer.decoder.decode_plc() {
-                        Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
-                        Err(e) => log::debug!("PLC error for peer {}: {e}", peer.id),
-                    },
+                    match peer.jitter_buffer.pop() {
+                        Some(pcm_i16) => {
+                            peer_bufs.push(codec::i16_to_f32(&pcm_i16));
+                        }
+                        None => match peer.decoder.decode_plc() {
+                            Ok(plc) => peer_bufs.push(codec::i16_to_f32(&plc)),
+                            Err(e) => log::debug!("PLC error for peer {}: {e}", peer.id),
+                        },
+                    }
                 }
-            }
 
-            if !peer_bufs.is_empty() {
-                let refs: Vec<&[f32]> = peer_bufs.iter().map(|b| b.as_slice()).collect();
-                mixer::mix_peers(&refs, &mut mixed);
-                let written = playout_prod.push_slice(&mixed);
-                if written < mixed.len() {
-                    log::debug!("playout ring buffer full, dropped samples");
+                if !peer_bufs.is_empty() {
+                    let refs: Vec<&[f32]> = peer_bufs.iter().map(|b| b.as_slice()).collect();
+                    mixer::mix_peers(&refs, &mut mixed);
+                    let written = playout_prod.push_slice(&mixed);
+                    if written < mixed.len() {
+                        log::debug!("playout ring buffer full, dropped samples");
+                    }
                 }
+
+                last_playout = Instant::now();
             }
 
             // --- Keepalive ---
